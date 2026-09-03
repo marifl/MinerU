@@ -1,5 +1,8 @@
 # Copyright (c) Opendatalab. All rights reserved.
+import importlib.util
+import os
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
 import json_repair
 from loguru import logger
@@ -15,6 +18,42 @@ TITLE_BLOCK_TYPES = {
     BlockType.PARAGRAPH_TITLE,
 }
 MAX_TITLE_GROUP_WORKERS = 4
+
+# Public names a user override module may define to replace the built-in
+# prompt builders. Keyed by the built-in function name.
+PROMPT_OVERRIDE_NAMES = {
+    "_build_title_optimize_prompt": "build_title_optimize_prompt",
+    "_build_relative_title_optimize_prompt": "build_relative_title_optimize_prompt",
+}
+
+
+@lru_cache(maxsize=None)
+def _load_prompt_override(override_file):
+    path = os.path.expanduser(override_file)
+    if not os.path.isfile(path):
+        raise FileNotFoundError(
+            f"llm-aided-config.title_aided.override_file does not exist: {path}"
+        )
+    spec = importlib.util.spec_from_file_location("mineru_llm_aided_override", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _resolve_prompt_builder(title_aided_config, prompt_builder):
+    """Return the user-provided prompt builder for `prompt_builder` if
+    `override_file` is configured and defines one, else `prompt_builder`."""
+    override_file = title_aided_config.get("override_file")
+    if not override_file:
+        return prompt_builder
+    override = _load_prompt_override(override_file)
+    public_name = PROMPT_OVERRIDE_NAMES[prompt_builder.__name__]
+    custom = getattr(override, public_name, None)
+    if custom is None:
+        return prompt_builder
+    if not callable(custom):
+        raise TypeError(f"{override_file}: {public_name} must be callable")
+    return custom
 
 
 def _get_title_line_avg_height(block):
@@ -171,6 +210,7 @@ def _request_title_levels(title_aided_config, title_dict, prompt_builder=None):
     expected_keys = set(range(len(title_dict)))
     if prompt_builder is None:
         prompt_builder = _build_title_optimize_prompt
+    prompt_builder = _resolve_prompt_builder(title_aided_config, prompt_builder)
     title_optimize_prompt = prompt_builder(title_dict)
 
     logger.debug(f"Requesting LLM for title optimization with prompt: {title_optimize_prompt}")
@@ -185,6 +225,11 @@ def _request_title_levels(title_aided_config, title_dict, prompt_builder=None):
         api_params["extra_body"] = {
             "enable_thinking": title_aided_config["enable_thinking"]
         }
+    extra_body = title_aided_config.get("extra_body")
+    if extra_body:
+        if not isinstance(extra_body, dict):
+            raise TypeError("llm-aided-config.title_aided.extra_body must be a JSON object")
+        api_params["extra_body"] = {**api_params.get("extra_body", {}), **extra_body}
 
     while retry_count < max_retries:
         try:

@@ -132,6 +132,8 @@ MinerU 现已实现开箱即用，但也支持通过配置文件扩展功能。�
     * 默认使用`阿里云百炼`的`qwen3-next-80b-a3b-instruct`模型
     * 您需要自行配置 API 密钥并将`enable`设置为`true`来启用此功能
     * 如果您的api供应商不支持`enable_thinking`参数，请手动将该参数删除
+    * 可选参数`extra_body`（对象）：原样合并到请求体中，用于OpenAI协议未覆盖的供应商特定字段，例如`{"reasoning_effort": "none"}`可在Ollama上关闭思考模式，`{"thinking_budget": 800}`适用于支持限制推理token数的供应商
+    * 可选参数`override_file`：指向一个Python文件的路径，用于替换内置的标题分级提示词。该文件可以定义`build_title_optimize_prompt(title_dict)`和/或`build_relative_title_optimize_prompt(title_dict)`，各自返回提示词字符串。留空或省略则使用内置提示词；配置的路径不存在时会报错
         * 例如，在您的配置文件中，`llm-aided-config` 部分可能如下所示：
           ```json
           "llm-aided-config": {

@@ -19,6 +19,8 @@
             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
             "model": "qwen3.5-plus",
             "enable_thinking": false,
+            "extra_body": {},
+            "override_file": "",
             "enable": false
         }
     },
