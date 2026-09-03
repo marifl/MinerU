@@ -34,6 +34,9 @@ CHUNK_ANCHOR_PATTERN = re.compile(
     re.IGNORECASE,
 )
 DEFAULT_CHUNK_CONTEXT = 8
+NUMBERED_HEADING_PATTERN = re.compile(r"^\s*(\d+(?:\.\d+)*)\s+\S")
+MAX_TITLE_LEVEL = 4
+MIN_NUMBERING_VOTES = 5
 
 
 @lru_cache(maxsize=None)
@@ -423,6 +426,60 @@ def _build_chunk_context(leveled_entries, context_size):
     }
 
 
+def _numbering_depth(text):
+    match = NUMBERED_HEADING_PATTERN.match(text)
+    return match.group(1).count(".") + 1 if match else None
+
+
+def _realign_chunks_by_numbering(chunk_levels):
+    """chunk_levels: list of lists of (text, level|None) per chunk, mutated in place.
+    Dotted numbering ("3.2", "3.2.1") is ground truth for relative depth. A chunk whose numbered
+    titles all sit a constant offset away from the document-wide majority level for their depth is
+    shifted back as a whole; afterwards every numbered title is pinned to that majority level."""
+    from collections import Counter, defaultdict
+
+    global_votes = defaultdict(Counter)
+    for chunk in chunk_levels:
+        for text, level in chunk:
+            depth = _numbering_depth(text)
+            if depth and level:
+                global_votes[depth][level] += 1
+    majority = {}
+    for depth in sorted(global_votes):
+        votes = global_votes[depth]
+        if sum(votes.values()) < MIN_NUMBERING_VOTES:
+            continue
+        level = votes.most_common(1)[0][0]
+        if majority and level <= max(majority.values()):
+            continue  # deeper numbering must sit on a deeper level, otherwise the votes are noise
+        majority[depth] = level
+    if not majority:
+        return
+
+    for chunk_no, chunk in enumerate(chunk_levels, start=1):
+        chunk_votes = defaultdict(Counter)
+        for text, level in chunk:
+            depth = _numbering_depth(text)
+            if depth and level:
+                chunk_votes[depth][level] += 1
+        offsets = {
+            votes.most_common(1)[0][0] - majority[depth]
+            for depth, votes in chunk_votes.items()
+            if depth in majority and sum(votes.values()) >= 2
+        }
+        if len(offsets) == 1 and (offset := offsets.pop()) != 0:
+            logger.info(f"Chunk {chunk_no}: shifting all levels by {-offset} (numbering offset)")
+            for i, (text, level) in enumerate(chunk):
+                if level:
+                    chunk[i] = (text, max(1, level - offset))
+        for i, (text, level) in enumerate(chunk):
+            depth = _numbering_depth(text)
+            if depth and level and depth in majority:
+                chunk[i] = (text, majority[depth])
+            elif level and level > MAX_TITLE_LEVEL:
+                chunk[i] = (text, MAX_TITLE_LEVEL)
+
+
 def _run_chunked_title_leveling(title_block_refs, title_aided_config, chunk_size):
     context_size = int(title_aided_config.get("chunk_context", DEFAULT_CHUNK_CONTEXT))
     chunks = _split_title_chunks(title_block_refs, chunk_size)
@@ -431,6 +488,7 @@ def _run_chunked_title_leveling(title_block_refs, title_aided_config, chunk_size
         f"(chunk_size={chunk_size}, titles={len(title_block_refs)})"
     )
     leveled_entries = []
+    chunk_levels = []
     for chunk_no, chunk in enumerate(chunks, start=1):
         title_dict = _build_title_dict(chunk)
         context = _build_chunk_context(leveled_entries, context_size)
@@ -441,10 +499,17 @@ def _run_chunked_title_leveling(title_block_refs, title_aided_config, chunk_size
         levels_by_index = _request_title_levels(title_aided_config, title_dict, prompt_builder=prompt_builder)
         if levels_by_index is None:
             logger.error(f"Chunk {chunk_no}/{len(chunks)} failed, its titles keep no level.")
+            chunk_levels.append([(text, None) for text, _, _ in title_dict.values()])
             continue
-        _apply_levels_to_blocks(chunk, levels_by_index)
+        chunk_levels.append([(text, int(levels_by_index[int(key)])) for key, (text, _, _) in title_dict.items()])
         for key, (text, height, page) in title_dict.items():
             leveled_entries.append([text, height, page, int(levels_by_index[int(key)])])
+
+    _realign_chunks_by_numbering(chunk_levels)
+    for chunk, leveled in zip(chunks, chunk_levels):
+        levels_by_index = {i: level for i, (_, level) in enumerate(leveled) if level is not None}
+        if len(levels_by_index) == len(chunk):
+            _apply_levels_to_blocks(chunk, levels_by_index)
 
 
 def _split_paragraph_title_groups(title_block_refs):
