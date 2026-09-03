@@ -1,8 +1,9 @@
 # Copyright (c) Opendatalab. All rights reserved.
 import importlib.util
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
+from functools import lru_cache, partial
 
 import json_repair
 from loguru import logger
@@ -24,7 +25,15 @@ MAX_TITLE_GROUP_WORKERS = 4
 PROMPT_OVERRIDE_NAMES = {
     "_build_title_optimize_prompt": "build_title_optimize_prompt",
     "_build_relative_title_optimize_prompt": "build_relative_title_optimize_prompt",
+    "_build_chunk_title_optimize_prompt": "build_chunk_title_optimize_prompt",
 }
+
+# Headings that look like chapter starts; chunk boundaries prefer to sit right before them.
+CHUNK_ANCHOR_PATTERN = re.compile(
+    r"^\s*(\d{1,3}\s+\S|(kapitel|chapter|teil|part|abschnitt|section)\s+[\divxlc]+\b|[IVXLC]{1,6}\.\s)",
+    re.IGNORECASE,
+)
+DEFAULT_CHUNK_CONTEXT = 8
 
 
 @lru_cache(maxsize=None)
@@ -47,7 +56,9 @@ def _resolve_prompt_builder(title_aided_config, prompt_builder):
     if not override_file:
         return prompt_builder
     override = _load_prompt_override(override_file)
-    public_name = PROMPT_OVERRIDE_NAMES[prompt_builder.__name__]
+    public_name = PROMPT_OVERRIDE_NAMES.get(getattr(prompt_builder, "__name__", None))
+    if public_name is None:
+        return prompt_builder
     custom = getattr(override, public_name, None)
     if custom is None:
         return prompt_builder
@@ -196,6 +207,50 @@ Corrected title list:
 """
 
 
+def _build_chunk_title_optimize_prompt(context, title_dict):
+    return f"""输入内容是一篇长文档中一段连续的标题，该文档的标题正在分批处理，本批之前的标题已经完成分级。
+
+已分级的上下文（格式为 [标题文本, 行高, 页码, 层级]），其中 "path" 是当前仍然打开的各级章节，"previous" 是紧邻本批之前的若干标题：
+{context}
+
+请注意：
+- 上下文中的标题不在本次输入中，不要重新输出它们
+- 本批标题的层级必须与上下文保持一致：同一类标题使用同一层级，位于上下文章节之下的标题层级要更深
+
+1. 字典中每个value均为一个list，包含以下元素：
+    - 标题文本
+    - 文本行高是标题所在块的平均行高
+    - 标题所在的页码
+
+2. 保留原始内容：
+    - 输入的字典中所有元素都是有效的，不能删除字典中的任何元素
+    - 请务必保证输出的字典中元素的数量和输入的数量一致
+
+3. 保持字典内key-value的对应关系不变
+
+4. 优化层次结构：
+    - 根据标题内容的语义为每个标题元素添加适当的层次结构
+    - 行高较大的标题一般是更高级别的标题
+    - 标题层级最多为4级，不要添加过多的层级
+    - 优化后的标题只保留代表该标题的层级的整数，不要保留其他信息
+
+IMPORTANT:
+请直接返回优化后的标题层级字典，格式为{{标题id:标题层级}}，如下：
+{{
+  0:1,
+  1:2,
+  2:2,
+  3:3
+}}
+不要返回 Markdown，不要返回代码块，不要返回任何解释文字。
+
+Input title list:
+{title_dict}
+
+Corrected title list:
+"""
+
+
 def _request_title_levels(title_aided_config, title_dict, prompt_builder=None):
     if len(title_dict) == 0:
         return {}
@@ -318,6 +373,80 @@ def _run_single_pass_title_leveling(title_block_refs, title_aided_config):
     _apply_levels_to_blocks(title_block_refs, levels_by_index)
 
 
+def _split_title_chunks(title_block_refs, chunk_size):
+    """Split refs into consecutive chunks of at most chunk_size titles. A chunk ends early
+    if a chapter-like anchor (numbering pattern or a line height in the top decile) lies in
+    its last 40%, so chapters stay together whenever they are shorter than chunk_size."""
+    total = len(title_block_refs)
+    if total <= chunk_size:
+        return [title_block_refs]
+
+    entries = [
+        (merge_para_with_text(block), _get_title_line_avg_height(block))
+        for _, block in title_block_refs
+    ]
+    heights = sorted(h for _, h in entries if isinstance(h, (int, float)) and h > 0)
+    height_threshold = heights[int(len(heights) * 0.9)] if heights else float("inf")
+    anchors = {
+        i for i, (text, height) in enumerate(entries)
+        if CHUNK_ANCHOR_PATTERN.match(text) or (height is not None and height >= height_threshold)
+    }
+
+    chunks = []
+    start = 0
+    while start < total:
+        end = min(start + chunk_size, total)
+        if end < total:
+            lowest_cut = start + max(1, int(chunk_size * 0.6))
+            anchor_cut = next((i for i in range(end, lowest_cut, -1) if i in anchors), None)
+            if anchor_cut is not None:
+                end = anchor_cut
+        chunks.append(title_block_refs[start:end])
+        start = end
+    return chunks
+
+
+def _build_chunk_context(leveled_entries, context_size):
+    if not leveled_entries:
+        return None
+    path = {}
+    for entry in leveled_entries:
+        path[entry[3]] = entry
+    for level in list(path):
+        # a section is still open only if no later heading sits at a higher level
+        later_higher = any(e[3] < level for e in leveled_entries[leveled_entries.index(path[level]) + 1:])
+        if later_higher:
+            del path[level]
+    return {
+        "path": [path[level] for level in sorted(path)],
+        "previous": leveled_entries[-context_size:],
+    }
+
+
+def _run_chunked_title_leveling(title_block_refs, title_aided_config, chunk_size):
+    context_size = int(title_aided_config.get("chunk_context", DEFAULT_CHUNK_CONTEXT))
+    chunks = _split_title_chunks(title_block_refs, chunk_size)
+    logger.info(
+        f"LLM-aided title leveling in {len(chunks)} chunks "
+        f"(chunk_size={chunk_size}, titles={len(title_block_refs)})"
+    )
+    leveled_entries = []
+    for chunk_no, chunk in enumerate(chunks, start=1):
+        title_dict = _build_title_dict(chunk)
+        context = _build_chunk_context(leveled_entries, context_size)
+        prompt_builder = None
+        if context is not None:
+            chunk_builder = _resolve_prompt_builder(title_aided_config, _build_chunk_title_optimize_prompt)
+            prompt_builder = partial(chunk_builder, context)
+        levels_by_index = _request_title_levels(title_aided_config, title_dict, prompt_builder=prompt_builder)
+        if levels_by_index is None:
+            logger.error(f"Chunk {chunk_no}/{len(chunks)} failed, its titles keep no level.")
+            continue
+        _apply_levels_to_blocks(chunk, levels_by_index)
+        for key, (text, height, page) in title_dict.items():
+            leveled_entries.append([text, height, page, int(levels_by_index[int(key)])])
+
+
 def _split_paragraph_title_groups(title_block_refs):
     groups = []
     current_group = []
@@ -419,7 +548,10 @@ def llm_aided_title(page_info_list, title_aided_config):
         else:
             title_refs_for_llm.append(title_ref)
 
-    if len(title_refs_for_llm) > 0:
+    chunk_size = int(title_aided_config.get("chunk_size", 0) or 0)
+    if chunk_size > 0 and len(title_refs_for_llm) > chunk_size:
+        _run_chunked_title_leveling(title_refs_for_llm, title_aided_config, chunk_size)
+    elif len(title_refs_for_llm) > 0:
         _run_single_pass_title_leveling(title_refs_for_llm, title_aided_config)
 
     _normalize_title_types(doc_title_refs)

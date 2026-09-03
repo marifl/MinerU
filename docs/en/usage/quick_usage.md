@@ -133,7 +133,8 @@ Here are some available configuration options:
     * You need to configure your own API key and set `enable` to `true` to enable this feature.
     * If your API provider does not support the `enable_thinking` parameter, please manually remove it.
     * Optional `extra_body` (object): merged into the request body as-is, for provider-specific fields the OpenAI schema does not cover, e.g. `{"reasoning_effort": "none"}` to disable thinking on Ollama, or `{"thinking_budget": 800}` for providers that cap reasoning tokens.
-    * Optional `override_file`: path to a Python file that replaces the built-in title-leveling prompts. It may define `build_title_optimize_prompt(title_dict)` and/or `build_relative_title_optimize_prompt(title_dict)`, each returning the prompt string. Leave empty or omit to use the built-in prompts; a configured path that does not exist is an error.
+    * Optional `chunk_size` (integer, default 0 = off): for documents with more titles than this, the title list is sent in consecutive chunks of at most `chunk_size` titles instead of one request. Chunks prefer to end before chapter-like headings (numbering, or a line height in the top decile); each chunk after the first receives the still-open chapter path plus the last `chunk_context` leveled titles (default 8) as fixed context. Keeps prompt size and KV-cache memory bounded for very long documents.
+    * Optional `override_file`: path to a Python file that replaces the built-in title-leveling prompts. It may define `build_title_optimize_prompt(title_dict)`, `build_relative_title_optimize_prompt(title_dict)` and/or `build_chunk_title_optimize_prompt(context, title_dict)`, each returning the prompt string. Leave empty or omit to use the built-in prompts; a configured path that does not exist is an error.
         * For example, in your configuration file, the `llm-aided-config` section may look like:
           ```json
           "llm-aided-config": {

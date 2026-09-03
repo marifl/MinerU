@@ -133,7 +133,8 @@ MinerU 现已实现开箱即用，但也支持通过配置文件扩展功能。�
     * 您需要自行配置 API 密钥并将`enable`设置为`true`来启用此功能
     * 如果您的api供应商不支持`enable_thinking`参数，请手动将该参数删除
     * 可选参数`extra_body`（对象）：原样合并到请求体中，用于OpenAI协议未覆盖的供应商特定字段，例如`{"reasoning_effort": "none"}`可在Ollama上关闭思考模式，`{"thinking_budget": 800}`适用于支持限制推理token数的供应商
-    * 可选参数`override_file`：指向一个Python文件的路径，用于替换内置的标题分级提示词。该文件可以定义`build_title_optimize_prompt(title_dict)`和/或`build_relative_title_optimize_prompt(title_dict)`，各自返回提示词字符串。留空或省略则使用内置提示词；配置的路径不存在时会报错
+    * 可选参数`chunk_size`（整数，默认0表示关闭）：当文档标题数超过该值时，标题列表按不超过`chunk_size`个标题的连续批次分批请求，而不是一次性发送。批次优先在章节样式的标题（编号，或行高处于最高十分位）之前结束；第一批之后的每一批都会附带仍然打开的章节路径和最近`chunk_context`个（默认8）已分级标题作为固定上下文。用于限制超长文档的提示词长度和KV缓存占用。
+    * 可选参数`override_file`：指向一个Python文件的路径，用于替换内置的标题分级提示词。该文件可以定义`build_title_optimize_prompt(title_dict)`、`build_relative_title_optimize_prompt(title_dict)`和/或`build_chunk_title_optimize_prompt(context, title_dict)`，各自返回提示词字符串。留空或省略则使用内置提示词；配置的路径不存在时会报错
         * 例如，在您的配置文件中，`llm-aided-config` 部分可能如下所示：
           ```json
           "llm-aided-config": {

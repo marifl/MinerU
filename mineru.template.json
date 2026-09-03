@@ -20,6 +20,8 @@
             "model": "qwen3.5-plus",
             "enable_thinking": false,
             "extra_body": {},
+            "chunk_size": 0,
+            "chunk_context": 8,
             "override_file": "",
             "enable": false
         }
