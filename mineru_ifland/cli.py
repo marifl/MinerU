@@ -5,7 +5,8 @@
               [--title-levels auto|slides|numbered|off]
 
 Output per input, as MinerU 3.x wrote it: <out>/<stem>/<backend dir>/ with
-<stem>.md, <stem>_content_list.json, <stem>_content_list_v2.json, images/, <stem>_origin.pdf,
+<stem>.md, <stem>_content_list.json (plain text like 3.x), <stem>_content_list_v2.json (with
+bold/italic as `style`), images/, <stem>_origin.pdf,
 plus <stem>_middle_v4.json (MinerU 4 schema) and <stem>_mineru.json (provenance).
 
 There is deliberately no <stem>_middle.json: MinerU 4 has a different middle schema, and readers of
@@ -23,6 +24,8 @@ import tempfile
 from pathlib import Path
 
 import pypdfium2 as pdfium
+from docvortex.schema import TextSpan
+from pydantic import BaseModel
 
 from mineru.filetypes import is_flash_only_parse_extension
 from mineru.kit.common import ensure_supported_inputs, expand_input_paths
@@ -31,6 +34,7 @@ from mineru.parser.base import ParseResult
 from mineru.parser.writer import FileBasedDataWriter
 from mineru.render.content_list import render_content_list
 from mineru.render.content_list_v2 import render_content_list_v2
+from mineru.types import MiddleJson
 from mineru.version import __version__ as mineru_version
 
 from . import __version__
@@ -102,6 +106,21 @@ def _dump(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
 
 
+def _without_styles(middle_json: MiddleJson) -> MiddleJson:
+    """Deep copy of `middle_json` with every inline text style removed."""
+    plain = middle_json.model_copy(deep=True)
+    pending: list[object] = [plain]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, TextSpan):
+            node.styles = []
+        elif isinstance(node, BaseModel):
+            pending.extend(getattr(node, name) for name in type(node).model_fields)
+        elif isinstance(node, (list, tuple)):
+            pending.extend(node)
+    return plain
+
+
 def write_legacy_layout(result: ParseResult, source: Path, target: Path, provenance: dict) -> None:
     """Write `result` into `target` with MinerU 3.x file names."""
     stem = source.stem
@@ -117,7 +136,8 @@ def write_legacy_layout(result: ParseResult, source: Path, target: Path, provena
             shutil.move(tmp / "images", target / "images")
         shutil.move(tmp / "markdown.md", target / f"{stem}.md")
         shutil.move(tmp / "middle_json.json", target / f"{stem}_middle_v4.json")
-    _dump(target / f"{stem}_content_list.json", render_content_list(exported))
+    # 3.x content lists carried plain text; bold/italic stay in content_list_v2 (`style`) and markdown
+    _dump(target / f"{stem}_content_list.json", render_content_list(_without_styles(exported)))
     _dump(target / f"{stem}_content_list_v2.json", render_content_list_v2(exported))
     if source.suffix.lower() == ".pdf":
         shutil.copyfile(source, target / f"{stem}_origin.pdf")

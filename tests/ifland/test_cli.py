@@ -8,7 +8,12 @@ import pytest
 from mineru.parser.base import ParseResult
 from mineru_ifland import cli
 
-from test_title_levels import _doc, _text, _title
+from mineru.types import BlockType, TextBlock
+from test_title_levels import BBOX, _doc, _text, _title
+
+
+def _bold_text(index: int, text: str) -> TextBlock:
+    return TextBlock(type=BlockType.TEXT, index=index, bbox=BBOX, content=[{"type": "text", "content": text, "styles": ["bold"]}])
 
 
 @pytest.fixture
@@ -29,7 +34,7 @@ def test_writes_3x_layout_with_levels_and_provenance(tmp_path, landscape_pdf, mo
         calls.append(kwargs)
         return ParseResult(
             middle_json=_doc(
-                [_title(0, "EFA", doc=True), _title(1, "Ladungen"), _text(2, "Text")],
+                [_title(0, "EFA", doc=True), _title(1, "Ladungen"), _bold_text(2, "Text")],
                 [_title(0, "EFA"), _title(1, "Eigenwert")],
             )
         )
@@ -57,6 +62,9 @@ def test_writes_3x_layout_with_levels_and_provenance(tmp_path, landscape_pdf, mo
         ("EFA", 2),
         ("Eigenwert", 3),
     ]
+    v2 = json.loads((target / "Vorlesung 3_content_list_v2.json").read_text())
+    assert [span.get("style") for page in v2 for block in page if block["type"] == "paragraph"
+            for span in block["content"]["paragraph_content"]] == [["bold"]]
     provenance = json.loads((target / "Vorlesung 3_mineru.json").read_text())
     assert provenance["parse"] == {"tier": "standard", "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}
     assert provenance["title_levels"] == {"requested": "auto", "applied": "slides"}
