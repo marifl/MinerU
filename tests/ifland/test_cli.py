@@ -77,3 +77,21 @@ def test_pipeline_backend_maps_to_basic_tier_and_method_dir(tmp_path, landscape_
 def test_refuses_switching_off_formula_recognition(tmp_path, landscape_pdf):
     with pytest.raises(SystemExit, match="formula or table"):
         cli.main(["-p", str(landscape_pdf), "-o", str(tmp_path), "-f", "false"])
+
+
+def test_office_inputs_keep_their_own_heading_levels(tmp_path, monkeypatch):
+    source = tmp_path / "Skript.docx"
+    source.write_bytes(b"placeholder, parse is faked")
+    calls = []
+
+    def fake_parse(path, **kwargs):
+        calls.append(kwargs["tier"])
+        return ParseResult(middle_json=_doc([_title(0, "§ 1"), _title(1, "Ziel"), _title(2, "§ 2 Zweck")]))
+
+    monkeypatch.setattr(cli, "parse", fake_parse)
+
+    cli.main(["-p", str(source), "-o", str(tmp_path / "out")])
+
+    provenance = json.loads((tmp_path / "out" / "Skript" / "hybrid_auto" / "Skript_mineru.json").read_text())
+    assert calls == ["flash"]
+    assert provenance["title_levels"] == {"requested": "auto", "applied": "off"}

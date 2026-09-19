@@ -144,7 +144,10 @@ def main(argv: list[str] | None = None) -> int:
             image_analysis=args.image_analysis,
             page_range=page_range,
         )
-        applied = apply_title_levels(result.middle_json, args.title_levels, landscape=_is_landscape(source))
+        mode = args.title_levels
+        if mode == "auto" and source_tier == "flash":
+            mode = "off"  # Office, EPUB and HTML carry their own heading structure
+        applied = apply_title_levels(result.middle_json, mode, landscape=_is_landscape(source))
         target = output / source.stem / dir_pattern.format(method=args.method)
         provenance = {
             "tool": {"mineru_de": __version__, "mineru": mineru_version},

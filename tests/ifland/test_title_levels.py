@@ -122,3 +122,79 @@ def test_off_changes_nothing():
     assert apply_title_levels(doc, "off") == "off"
 
     assert _levels(doc) == [("§ 1", 2), ("Ziel", 2)]
+
+
+def test_numbered_chapter_doc_titles_toc_lines_and_unnumbered_parents():
+    doc = _doc(
+        [_title(0, "Inhalt"), _title(1, "1 Einleitung .... 3"), _title(2, "2 Methode 7")],
+        [_title(0, "1． Einleitung"), _title(1, "2. Methode", doc=True), _title(2, "Stichprobe"), _title(3, "2.1.1 Rekrutierung")],
+        [_title(0, "2.1.2 Ausschluss"), _title(1, "2.2.Durchführung"), _title(2, "A) Anhang")],
+    )
+
+    assert apply_title_levels(doc) == "numbered"
+
+    assert _levels(doc) == [
+        ("Inhalt", 2),
+        ("1 Einleitung .... 3", 2),
+        ("2 Methode 7", 2),
+        ("1． Einleitung", 2),
+        ("2. Methode", 2),
+        ("Stichprobe", 3),
+        ("2.1.1 Rekrutierung", 4),
+        ("2.1.2 Ausschluss", 4),
+        ("2.2.Durchführung", 3),
+        ("A) Anhang", 4),  # a single letter is too rare to shape the outline
+    ]
+
+
+def test_backward_numbers_and_rare_kinds_do_not_push_the_outline_down():
+    doc = _doc(
+        [_title(0, "Wahrnehmung", doc=True), *[_title(i + 1, f"7.{i + 1} Abschnitt") for i in range(4)]],
+        [_title(0, "I. Hypothese"), _title(1, "1. Exponentielle Dynamik"), _title(2, "2. Bias"), _title(3, "7.5 Abschnitt")],
+        [_title(0, "Sprache", doc=True), _title(1, "8.1 Abschnitt"), _title(2, "8.1.1 Unterabschnitt")],
+    )
+
+    assert apply_title_levels(doc) == "numbered"
+
+    levels = dict(_levels(doc))
+    assert levels["7.1 Abschnitt"] == levels["7.5 Abschnitt"] == levels["8.1 Abschnitt"] == 2
+    assert levels["8.1.1 Unterabschnitt"] == 3
+    assert levels["I. Hypothese"] == levels["1. Exponentielle Dynamik"] == 3
+    assert levels["Wahrnehmung"] == levels["Sprache"] == 1
+
+
+def test_a_stray_early_number_does_not_discard_the_real_outline():
+    doc = _doc(
+        [_title(0, "5 Anwendung des Verfahrens"), _title(1, "Literatur")],
+        [_title(0, "1 Überblick", doc=True), _title(1, "2 Einleitung", doc=True), _title(2, "2.1 Definitionen")],
+        [_title(0, "3 Testentwicklung", doc=True), _title(1, "3.1 Original"), _title(2, "3.1.1 Faktoren")],
+    )
+
+    assert apply_title_levels(doc) == "numbered"
+
+    levels = dict(_levels(doc))
+    assert levels["1 Überblick"] == levels["2 Einleitung"] == levels["3 Testentwicklung"] == 2
+    assert levels["2.1 Definitionen"] == levels["3.1 Original"] == 3
+    assert levels["3.1.1 Faktoren"] == 4
+
+
+def test_numbered_chapters_join_unnumbered_chapter_doc_titles_on_level_1():
+    doc = _doc(
+        [_title(0, "Was ist das?", doc=True), _title(1, "1.1 Einführung"), _title(2, "1.2 Geschichte")],
+        [_title(0, "2 Das Gehirn"), _title(1, "2.1 Orientierung"), _title(2, "2.1.1 Kortex")],
+        [_title(0, "Nervenzellen", doc=True), _title(1, "3.1 Einführung")],
+    )
+
+    assert apply_title_levels(doc) == "numbered"
+
+    assert _levels(doc) == [
+        ("Was ist das?", 1),
+        ("1.1 Einführung", 2),
+        ("1.2 Geschichte", 2),
+        ("2 Das Gehirn", 1),
+        ("2.1 Orientierung", 2),
+        ("2.1.1 Kortex", 3),
+        ("Nervenzellen", 1),
+        ("3.1 Einführung", 2),
+    ]
+    assert isinstance(doc.pages[1].blocks[0], DocTitleBlock)

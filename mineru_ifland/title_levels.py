@@ -6,18 +6,22 @@ a hierarchy from what the document itself states:
 - slides: a running title (same text is the first title on at least two pages) is level 2;
   the first own title of a page is level 3 below a running title, else 2; further titles on
   the page sit one level deeper. A doc title on the first page that is not running stays level 1.
-- numbered: numbering decides. Roman sections ("II.", "Abschnitt 2") rank above dotted numbers
-  ("5", "5.1", "5.1.2"), which rank above "§ n". Unnumbered titles sit one level below the last
-  numbered one; a recurring unnumbered title ("Fallbeispiel", "Zusammenfassung") gets the level
-  most of its occurrences would get, so it is the same everywhere. A bare number ("§ 2")
-  directly followed by an unnumbered title is merged with it.
-- auto: slides if most PDF pages are landscape, numbered if enough titles carry numbers,
-  otherwise the levels stay as MinerU produced them.
+- numbered: numbering decides, whether MinerU saw the title as doc title or paragraph title.
+  Roman sections ("II.", "Abschnitt 2") rank above letters ("A)"), above dotted numbers
+  ("5", "Kapitel 5", "5.1", "5.1.2"), above "§ n". Table-of-contents lines carry no rank.
+  An unnumbered title right before "x.y.1" is that section's parent; an unnumbered doc title
+  (book or chapter title) stays level 1, and when such doc titles head "x.y" sections, numbered
+  chapters ("2 Das Gehirn") become level-1 doc titles as well; other unnumbered titles, boxes like "Fallbeispiel"
+  included, sit one level below the section they appear in. A bare number ("§ 2") directly
+  followed by an unnumbered title is merged with it.
+- auto: slides if most PDF pages are landscape; numbered if at least 3 titles carry numbers and
+  they are 30 % of all titles or 5 distinct numbers; otherwise the levels stay as MinerU made them.
 """
 
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections import Counter
 from typing import Literal
 
@@ -34,10 +38,19 @@ MAX_LEVEL = 6
 # auto picks "numbered" when at least this many titles, and this share of titles, carry numbers
 MIN_NUMBERED_TITLES = 3
 MIN_NUMBERED_SHARE = 0.3
+# ... or when at least this many distinct numbers occur (books numbering only their chapters)
+MIN_DISTINCT_NUMBERS = 5
+# a numbering kind (roman, letters, dotted depth, §) shapes the outline only with this much support
+MIN_KIND_TITLES = 10
+MIN_KIND_SHARE = 0.05
 
 ROMAN = re.compile(r"^(?:[IVX]{1,5}\.|(?:Abschnitt|Teil)\s+(?:[IVX]{1,5}|\d{1,2})\b)", re.IGNORECASE)
-DOTTED = re.compile(r"^(\d{1,2}(?:\.\d{1,2})*)\.?(?:\s+\S|$)")
+DOTTED = re.compile(r"^(\d{1,2}(?:\.\d{1,2})*)(?:\.?\s+\S|\.(?=[^\d\s.])|\.?$)")
+CHAPTER = re.compile(r"^(?:Kapitel|Chapter|Kap\.)\s+(\d{1,2})\b", re.IGNORECASE)
+ALPHA = re.compile(r"^(?:[A-H]\)\s+\S|[A-H]\.\s+[A-ZÄÖÜ][a-zäöüß]{2,})")
 PARAGRAPH = re.compile(r"^§\s*\d+")
+DOT_LEADER = re.compile(r"(?:\.\s*){2,}\d{1,4}\s*$")
+TRAILING_PAGE = re.compile(r"[^\d\s§]\.?\s+\d{1,4}\s*$")
 BARE_NUMBER = re.compile(r"^(?:§\s*\d+[a-z]?|\d{1,2}(?:\.\d{1,2})*\.?)$")
 
 
@@ -59,7 +72,7 @@ def apply_title_levels(middle_json: MiddleJson, mode: Mode = "auto", *, landscap
 
 
 def _text(block: DocTitleBlock | ParagraphTitleBlock) -> str:
-    return " ".join(inline_plain_text(block.content).split())
+    return " ".join(inline_plain_text(block.content).replace("．", ".").split())
 
 
 def _key(text: str) -> str:
@@ -73,6 +86,12 @@ def _as_paragraph_title(block: DocTitleBlock | ParagraphTitleBlock, level: int) 
     return ParagraphTitleBlock.model_validate(
         {**block.model_dump(), "type": BlockType.PARAGRAPH_TITLE, "level": level}
     )
+
+
+def _as_doc_title(block: DocTitleBlock | ParagraphTitleBlock) -> DocTitleBlock:
+    if isinstance(block, DocTitleBlock):
+        return block
+    return DocTitleBlock.model_validate({**block.model_dump(), "type": BlockType.DOC_TITLE, "level": MIN_LEVEL - 1})
 
 
 def _level_slides(middle_json: MiddleJson) -> None:
@@ -105,25 +124,140 @@ def _level_slides(middle_json: MiddleJson) -> None:
 
 
 def _numbering(text: str) -> tuple[str, int] | None:
-    """Rank key of a numbered title: ("roman", 0), ("dotted", depth) or ("paragraph", 0)."""
+    """Rank key of a numbered title: ("roman", 0), ("alpha", 0), ("dotted", depth) or ("paragraph", 0)."""
     if ROMAN.match(text):
         return ("roman", 0)
+    if ALPHA.match(text):
+        return ("alpha", 0)
     if PARAGRAPH.match(text):
         return ("paragraph", 0)
+    if CHAPTER.match(text):
+        return ("dotted", 1)
     match = DOTTED.match(text)
     if match:
         return ("dotted", match.group(1).count(".") + 1)
     return None
 
 
-def _paragraph_titles(middle_json: MiddleJson) -> list[ParagraphTitleBlock]:
-    return [b for page in middle_json.pages for b in page.blocks if isinstance(b, ParagraphTitleBlock)]
+def _number_token(text: str) -> str | None:
+    match = CHAPTER.match(text) or DOTTED.match(text)
+    if match:
+        return match.group(1)
+    if ROMAN.match(text) or ALPHA.match(text) or PARAGRAPH.match(text):
+        return " ".join(text.split()[:2]) if text.startswith("§") else text.split()[0]
+    return None
+
+
+ROMAN_VALUES = {"I": 1, "V": 5, "X": 10}
+
+
+def _sort_value(kind: str, token: str) -> tuple[int, ...]:
+    """Position of a number within its own sequence, for the order check."""
+    if kind == "dotted":
+        return tuple(int(part) for part in token.split("."))
+    if kind == "paragraph":
+        return (int(re.sub(r"\D", "", token) or 0),)
+    if kind == "alpha":
+        return (ord(token[0].upper()),)
+    letters = [ROMAN_VALUES.get(c, 0) for c in token.rstrip(".").upper() if c in ROMAN_VALUES]
+    value = sum(-v if i + 1 < len(letters) and v < letters[i + 1] else v for i, v in enumerate(letters))
+    return (value,)
+
+
+def _longest_increasing(indices: list[int], values: list[tuple[int, ...]]) -> set[int]:
+    """Indices of a longest strictly increasing subsequence of `values` (patience sorting)."""
+    tails: list[tuple[int, ...]] = []
+    tail_at: list[int] = []
+    previous: list[int | None] = []
+    for position, value in enumerate(values):
+        slot = bisect_left(tails, value)
+        if slot == len(tails):
+            tails.append(value)
+            tail_at.append(position)
+        else:
+            tails[slot] = value
+            tail_at[slot] = position
+        previous.append(tail_at[slot - 1] if slot else None)
+    keep: set[int] = set()
+    position = tail_at[-1] if tail_at else None
+    while position is not None:
+        keep.add(indices[position])
+        position = previous[position]
+    return keep
+
+
+def _document_numbering(texts: list[str], chapter_starts: list[bool]) -> list[tuple[str, int] | None]:
+    """Numbering per title, keeping only numbers that structure the document.
+
+    Dropped, so they rank nothing and count as unnumbered:
+    - table-of-contents lines: dot leaders ("1 Einleitung .... 5"), or a trailing page number while
+      a later heading repeats the number ("2.1 Methode 12" before "2.1 Methode");
+    - numbers outside the longest strictly increasing run of their kind, like a numbered list
+      MinerU took for headings ("1. Exponentielle Dynamik" amid "7.3.x"), a stray TOC line before
+      chapter 1, or a repeated running head; an unnumbered doc title (`chapter_starts`) starts a new run, for books whose
+      chapters each count from 1;
+    - kinds too rare to be the document's outline: fewer than MIN_KIND_SHARE of all numbered
+      titles and fewer than MIN_KIND_TITLES (five stray "I." boxes in a book of 500 "x.y" sections).
+    """
+    tokens = [_number_token(text) for text in texts]
+    numbering: list[tuple[str, int] | None] = []
+    for i, (text, token) in enumerate(zip(texts, tokens)):
+        n = _numbering(text) if token is not None else None
+        toc = n is not None and (
+            DOT_LEADER.search(text) or (TRAILING_PAGE.search(text) and token in tokens[i + 1 :])
+        )
+        numbering.append(None if toc else n)
+
+    # per chapter and kind, keep the longest strictly increasing run of numbers
+    segment = 0
+    sequences: dict[tuple[int, str], list[int]] = {}
+    for i, n in enumerate(numbering):
+        segment += chapter_starts[i]
+        if n:
+            sequences.setdefault((segment, n[0]), []).append(i)
+    for (_, kind), indices in sequences.items():
+        keep = _longest_increasing(indices, [_sort_value(kind, tokens[i]) for i in indices])
+        for i in indices:
+            if i not in keep:
+                numbering[i] = None
+
+    counts = Counter(kind for kind, _ in filter(None, numbering))
+    total = sum(counts.values())
+    minimum = min(MIN_KIND_TITLES, max(2, MIN_KIND_SHARE * total))
+    return [n if n and counts[n[0]] >= minimum else None for n in numbering]
+
+
+def _first_child_depth(text: str, numbering: tuple[str, int] | None) -> int | None:
+    """Depth of a dotted number that opens a section ("2.1.1" -> 3), else None."""
+    if numbering is None or numbering[0] != "dotted" or numbering[1] < 2:
+        return None
+    return numbering[1] if DOTTED.match(text).group(1).endswith(".1") else None
+
+
+TitleBlock = DocTitleBlock | ParagraphTitleBlock
+
+
+def _title_positions(middle_json: MiddleJson) -> list[tuple[list, int, TitleBlock]]:
+    return [
+        (page.blocks, position, block)
+        for page in middle_json.pages
+        for position, block in enumerate(page.blocks)
+        if isinstance(block, (DocTitleBlock, ParagraphTitleBlock))
+    ]
+
+
+def _chapter_starts(positions: list[tuple[list, int, TitleBlock]], texts: list[str]) -> list[bool]:
+    return [isinstance(block, DocTitleBlock) and _numbering(text) is None for (_, _, block), text in zip(positions, texts)]
 
 
 def _looks_numbered(middle_json: MiddleJson) -> bool:
-    titles = _paragraph_titles(middle_json)
-    numbered = sum(1 for b in titles if _numbering(_text(b)))
-    return numbered >= MIN_NUMBERED_TITLES and numbered >= MIN_NUMBERED_SHARE * len(titles)
+    positions = _title_positions(middle_json)
+    texts = [_text(block) for _, _, block in positions]
+    numbered = [text for text, n in zip(texts, _document_numbering(texts, _chapter_starts(positions, texts))) if n]
+    distinct = {_number_token(text) for text in numbered}
+    return len(numbered) >= MIN_NUMBERED_TITLES and (
+        len(numbered) >= MIN_NUMBERED_SHARE * len(texts) or len(distinct) >= MIN_DISTINCT_NUMBERS
+    )
 
 
 def _merge_bare_numbers(middle_json: MiddleJson) -> None:
@@ -143,23 +277,57 @@ def _merge_bare_numbers(middle_json: MiddleJson) -> None:
         page.blocks[:] = merged
 
 
-def _level_numbered(middle_json: MiddleJson) -> None:
-    titles = _paragraph_titles(middle_json)
-    numbering = [_numbering(_text(b)) for b in titles]
-    ranks = sorted({n for n in numbering if n}, key=lambda n: ({"roman": 0, "dotted": 1, "paragraph": 2}[n[0]], n[1]))
-    level_of = {n: min(MIN_LEVEL + i, MAX_LEVEL) for i, n in enumerate(ranks)}
-    last_numbered_level: int | None = None
-    candidates: dict[str, Counter] = {}
-    for block, n in zip(titles, numbering):
-        if n:
-            block.level = level_of[n]
-            last_numbered_level = block.level
-        else:
-            block.level = MIN_LEVEL if last_numbered_level is None else min(last_numbered_level + 1, MAX_LEVEL)
-            candidates.setdefault(_key(_text(block)), Counter())[block.level] += 1
+def _numbered_chapters_are_doc_titles(
+    positions: list[tuple[list, int, TitleBlock]],
+    numbering: list[tuple[str, int] | None],
+    ranks: list[tuple[str, int]],
+) -> bool:
+    """True when MinerU made some chapter titles unnumbered doc titles over "x.y" sections, so the
+    numbered chapter titles ("2 Das Gehirn") belong on the same level 1 instead of level 2.
 
-    # a recurring box ("Fallbeispiel") gets one level everywhere: the most frequent, the higher one on ties
-    for block, n in zip(titles, numbering):
-        votes = None if n else candidates[_key(_text(block))]
-        if votes and sum(votes.values()) >= 2:
-            block.level = min(votes, key=lambda level: (-votes[level], level))
+    Needs at least two such doc titles and no roman or letter numbering above the chapters.
+    """
+    if ("dotted", 1) not in ranks or any(kind in ("roman", "alpha") for kind, _ in ranks):
+        return False
+    chapters, open_chapter = 0, False
+    for (_, _, block), n in zip(positions, numbering):
+        if isinstance(block, DocTitleBlock) and n is None:
+            open_chapter = True
+        elif n == ("dotted", 1):
+            open_chapter = False
+        elif open_chapter and n == ("dotted", 2):
+            chapters += 1
+            open_chapter = False
+    return chapters >= 2
+
+
+def _level_numbered(middle_json: MiddleJson) -> None:
+    positions = _title_positions(middle_json)
+    texts = [_text(block) for _, _, block in positions]
+    numbering = _document_numbering(texts, _chapter_starts(positions, texts))
+    ranks = sorted({n for n in numbering if n}, key=lambda n: ({"roman": 0, "alpha": 1, "dotted": 2, "paragraph": 3}[n[0]], n[1]))
+    chapter_level = _numbered_chapters_are_doc_titles(positions, numbering, ranks)
+    if chapter_level:
+        ranks.remove(("dotted", 1))
+    level_of = {n: min(MIN_LEVEL + i, MAX_LEVEL) for i, n in enumerate(ranks)}
+
+    last_numbered_level: int | None = None
+    for i, ((blocks, position, block), n) in enumerate(zip(positions, numbering)):
+        if n and chapter_level and n == ("dotted", 1):
+            blocks[position] = _as_doc_title(block)
+            last_numbered_level = MIN_LEVEL - 1
+            continue
+        if n:
+            level = level_of[n]
+            last_numbered_level = level
+        elif isinstance(block, DocTitleBlock):
+            last_numbered_level = None  # an unnumbered doc title (book or chapter title) opens a new context
+            continue
+        elif i + 1 < len(texts) and (depth := _first_child_depth(texts[i + 1], numbering[i + 1])):
+            # an unnumbered title right before "x.y.1" is the section that number belongs to
+            level = max(MIN_LEVEL, level_of[("dotted", depth)] - 1)
+            last_numbered_level = level
+        else:
+            # boxes and other unnumbered titles belong to the section they appear in
+            level = MIN_LEVEL if last_numbered_level is None else min(last_numbered_level + 1, MAX_LEVEL)
+        blocks[position] = _as_paragraph_title(block, level)
