@@ -1,0 +1,168 @@
+"""`mineru-de`: MinerU 4.x parsing behind the MinerU 3.x command line and output layout.
+
+    mineru-de -p <file|dir> -o <out> [-m auto|txt|ocr] [-b BACKEND] [-l LANG] [-s N] [-e N]
+              [-f true|false] [-t true|false] [--image-analysis true|false]
+              [--title-levels auto|slides|numbered|off]
+
+Output per input, as MinerU 3.x wrote it: <out>/<stem>/<backend dir>/ with
+<stem>.md, <stem>_content_list.json, <stem>_content_list_v2.json, images/, <stem>_origin.pdf,
+plus <stem>_middle_v4.json (MinerU 4 schema) and <stem>_mineru.json (provenance).
+
+There is deliberately no <stem>_middle.json: MinerU 4 has a different middle schema, and readers of
+the 3.x `pdf_info` layout should fail loudly instead of reading the wrong structure.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import shutil
+import sys
+import tempfile
+from pathlib import Path
+
+import pypdfium2 as pdfium
+
+from mineru.filetypes import is_flash_only_parse_extension
+from mineru.kit.common import ensure_supported_inputs, expand_input_paths
+from mineru.parser import parse
+from mineru.parser.base import ParseResult
+from mineru.parser.writer import FileBasedDataWriter
+from mineru.render.content_list import render_content_list
+from mineru.render.content_list_v2 import render_content_list_v2
+from mineru.version import __version__ as mineru_version
+
+from . import __version__
+from .title_levels import apply_title_levels
+
+# 3.x backend name -> (4.x tier, 3.x output directory name; {method} is the parse method)
+BACKENDS = {
+    "pipeline": ("basic", "{method}"),
+    "hybrid-auto-engine": ("standard", "hybrid_{method}"),
+    "hybrid-http-client": ("standard", "hybrid_{method}"),
+    "vlm-auto-engine": ("standard", "vlm"),
+    "vlm-http-client": ("standard", "vlm"),
+    "vlm-mlx-engine": ("standard", "vlm"),
+}
+
+
+def _bool(value: str) -> bool:
+    lowered = value.lower()
+    if lowered in {"true", "1", "yes"}:
+        return True
+    if lowered in {"false", "0", "no"}:
+        return False
+    raise argparse.ArgumentTypeError(f"expected true or false, got {value!r}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="mineru-de", description=__doc__.split("\n\n")[0])
+    parser.add_argument("-p", "--path", required=True, help="input file or directory")
+    parser.add_argument("-o", "--output", required=True, help="output directory")
+    parser.add_argument("-m", "--method", choices=["auto", "txt", "ocr"], default="auto")
+    parser.add_argument("-b", "--backend", choices=sorted(BACKENDS), default="hybrid-auto-engine")
+    parser.add_argument("-l", "--lang", default=None, help="accepted for 3.x compatibility; MinerU 4 has no language switch")
+    parser.add_argument("-s", "--start", type=int, default=None, help="first page, 0-based")
+    parser.add_argument("-e", "--end", type=int, default=None, help="last page, 0-based")
+    parser.add_argument("-f", "--formula", type=_bool, default=True)
+    parser.add_argument("-t", "--table", type=_bool, default=True)
+    parser.add_argument("--image-analysis", type=_bool, default=True)
+    parser.add_argument("--title-levels", choices=["auto", "slides", "numbered", "off"], default="auto")
+    return parser
+
+
+def _page_range(start: int | None, end: int | None) -> str:
+    if start is None and end is None:
+        return ""
+    first = (start or 0) + 1
+    return f"{first}-{end + 1}" if end is not None else f"{first}-r1"
+
+
+def _is_landscape(path: Path) -> bool:
+    if path.suffix.lower() != ".pdf":
+        return False
+    doc = pdfium.PdfDocument(str(path))
+    try:
+        landscape = sum(1 for page in doc if page.get_width() > page.get_height())
+        return landscape > len(doc) / 2
+    finally:
+        doc.close()
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _dump(path: Path, data: object) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
+
+
+def write_legacy_layout(result: ParseResult, source: Path, target: Path, provenance: dict) -> None:
+    """Write `result` into `target` with MinerU 3.x file names."""
+    stem = source.stem
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=target) as tmp_name:
+        tmp = Path(tmp_name)
+        result.save(FileBasedDataWriter(str(tmp)))
+        exported = ParseResult.from_json((tmp / "middle_json.json").read_text(encoding="utf-8")).middle_json
+
+        if (target / "images").exists():
+            shutil.rmtree(target / "images")
+        if (tmp / "images").exists():
+            shutil.move(tmp / "images", target / "images")
+        shutil.move(tmp / "markdown.md", target / f"{stem}.md")
+        shutil.move(tmp / "middle_json.json", target / f"{stem}_middle_v4.json")
+    _dump(target / f"{stem}_content_list.json", render_content_list(exported))
+    _dump(target / f"{stem}_content_list_v2.json", render_content_list_v2(exported))
+    if source.suffix.lower() == ".pdf":
+        shutil.copyfile(source, target / f"{stem}_origin.pdf")
+    _dump(target / f"{stem}_mineru.json", provenance)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if not args.formula or not args.table:
+        sys.exit("mineru-de: MinerU 4 cannot switch off formula or table recognition (-f/-t false)")
+
+    tier, dir_pattern = BACKENDS[args.backend]
+    page_range = _page_range(args.start, args.end)
+    output = Path(args.output).expanduser()
+    paths = expand_input_paths([args.path])
+    ensure_supported_inputs(paths)
+
+    for source in paths:
+        source_tier = "flash" if is_flash_only_parse_extension(source) else tier
+        result = parse(
+            source,
+            tier=source_tier,
+            ocr_mode=args.method,
+            image_analysis=args.image_analysis,
+            page_range=page_range,
+        )
+        applied = apply_title_levels(result.middle_json, args.title_levels, landscape=_is_landscape(source))
+        target = output / source.stem / dir_pattern.format(method=args.method)
+        provenance = {
+            "tool": {"mineru_de": __version__, "mineru": mineru_version},
+            "argv": sys.argv[1:] if argv is None else argv,
+            "source": {"path": str(source.resolve()), "sha256": _sha256(source)},
+            "parse": {
+                "tier": source_tier,
+                "ocr_mode": args.method,
+                "image_analysis": args.image_analysis,
+                "page_range": page_range or "all",
+            },
+            "title_levels": {"requested": args.title_levels, "applied": applied},
+            "ignored": {"lang": args.lang} if args.lang else {},
+        }
+        write_legacy_layout(result, source, target, provenance)
+        print(f"mineru-de: {source} -> {target}", file=sys.stderr)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

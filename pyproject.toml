@@ -124,6 +124,7 @@ mineru-webui = "mineru.kit.commands.webui:main"
 mineru-openai-server = "mineru.kit.commands.vlm_server:main"
 mineru-models-download = "mineru.kit.commands.models:download_main"
 mineru-api = "mineru.kit.commands.api_server:main"
+mineru-de = "mineru_ifland.cli:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "mineru.version.__version__" }
