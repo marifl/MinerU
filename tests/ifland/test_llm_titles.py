@@ -151,3 +151,56 @@ def test_the_model_call_carries_a_timeout(monkeypatch, tmp_path):
     llm_titles._ask({**llm_titles.DEFAULT_PROFILES["cloud"], "timeout": 30}, "prompt with timeout")
 
     assert seen["timeout"] == 30 and seen["max_retries"] == 0
+
+
+def _entries(prompt: str) -> list[dict]:
+    listing = prompt.split("Überschriften:\n", 1)[1]
+    return json.loads(listing[: listing.rindex("]") + 1])
+
+
+def _free_ids(prompt: str) -> list[int]:
+    return [e["id"] for e in _entries(prompt) if e["frei"]]
+
+
+def test_long_documents_are_asked_in_windows_with_fixed_context(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINERU_HOME", str(tmp_path))
+    monkeypatch.setattr(llm_titles, "MAX_TITLES_PER_REQUEST", 4)
+    monkeypatch.setattr(llm_titles, "CONTEXT_TITLES", 2)
+    prompts: list[str] = []
+    def collect(_profile, prompt):
+        prompts.append(prompt)
+        return {str(i): 3 for i in _free_ids(prompt)}, False
+
+    monkeypatch.setattr(llm_titles, "_ask", collect)
+    doc = _doc(*[[_title(0, f"{chapter} Kapitel"), _title(1, "Kasten"), _title(2, "Merksatz")] for chapter in range(1, 5)])
+    mode = apply_title_levels(doc)
+    assert mode == "numbered"
+
+    outcome = llm_titles.apply_llm_levels(doc, mode, "local")
+
+    assert outcome.accepted and len(prompts) == 3  # 12 headings in windows of 4
+    second = _entries(prompts[1])
+    assert [e["id"] for e in second] == [2, 3, 4, 5, 6, 7]  # two decided headings in front as context
+    assert [e["frei"] for e in second][:2] == [False, False]
+    assert {level for _, level in _levels(doc)} == {2, 3}
+
+
+def test_a_failing_window_keeps_the_rule_result_for_that_part(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINERU_HOME", str(tmp_path))
+    monkeypatch.setattr(llm_titles, "MAX_TITLES_PER_REQUEST", 4)
+    monkeypatch.setattr(llm_titles, "CONTEXT_TITLES", 0)
+
+    def answer(_profile, prompt):
+        ids = _free_ids(prompt)
+        return ({str(i): 9 for i in ids}, False) if min(ids) >= 4 else ({str(i): 2 for i in ids}, False)
+
+    monkeypatch.setattr(llm_titles, "_ask", answer)
+    doc = _doc(*[[_title(0, f"{chapter} Kapitel"), _title(1, "Kasten")] for chapter in range(1, 5)])
+    mode = apply_title_levels(doc)
+
+    outcome = llm_titles.apply_llm_levels(doc, mode, "local")
+
+    assert outcome.accepted and outcome.changed == 2  # only the first window was usable
+    assert "outside" in outcome.reason
+    assert _levels(doc)[1] == ("Kasten", 2)  # model level where it answered usably
+    assert _levels(doc)[5] == ("Kasten", 3)  # rule level kept where the model failed

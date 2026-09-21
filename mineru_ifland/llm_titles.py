@@ -2,7 +2,8 @@
 
 Rules first: wherever numbering or slide structure fixes a level, that level stands and is handed to
 the model as a fixed anchor. Only the remaining headings are asked about - short prompts, so a small
-local model is enough. The answer is accepted only if it is complete, stays within levels 2 to 6,
+local model is enough. A document with more headings than fit one prompt is asked in windows,
+each carrying the previously decided headings in front as fixed context. The answer is accepted only if it is complete, stays within levels 2 to 6,
 leaves the anchors untouched and produces no level jump. Otherwise the rule result stands and the
 report says so. Temperature is 0 and answers are cached per model and prompt, so a document parsed
 twice gets the same levels. A model that does not answer within the profile's `timeout`
@@ -46,6 +47,10 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
     },
 }
 MAX_ATTEMPTS = 2
+# a book has more headings than fits one prompt: ask in windows of this size, with the last
+# CONTEXT_TITLES already-decided headings in front as fixed context
+MAX_TITLES_PER_REQUEST = 120
+CONTEXT_TITLES = 8
 # a model that does not answer within this many seconds must not hold up a parse run
 DEFAULT_TIMEOUT = 120
 
@@ -207,26 +212,56 @@ def apply_llm_levels(middle_json: MiddleJson, mode: AppliedMode, profile_name: s
         for index, (page_idx, _, _, block) in enumerate(titles)
     ]
     outcome.asked = len(open_indices)
-    prompt = build_prompt(entries)
-
-    for attempt in range(MAX_ATTEMPTS):
-        try:
-            answer, cached = _ask(profile, prompt if attempt == 0 else prompt + "\nDie letzte Antwort war ungültig.")
-        except Exception as exc:  # network, server, malformed JSON
-            outcome.reason = f"{type(exc).__name__}: {exc}"
-            return outcome
-        outcome.cached = cached
-        levels, problem = validate(answer, entries)
+    reasons: list[str] = []
+    accepted_any = False
+    for window in _windows(entries):
+        levels = _ask_window(profile, window, outcome, reasons)
         if levels is None:
-            outcome.reason = problem
             continue
+        accepted_any = True
         for index, level in levels.items():
             _, _, _, block = titles[index]
             if block.level != level:
                 outcome.changes.append({"titel": entries[index]["titel"][:60], "von": block.level, "nach": level})
                 block.level = level
-        outcome.changed = len(outcome.changes)
-        outcome.accepted = True
-        outcome.reason = ""
-        return outcome
+            entries[index]["ebene"] = level
+            entries[index]["frei"] = False  # decided: fixed context for the next window
+    outcome.changed = len(outcome.changes)
+    outcome.accepted = accepted_any
+    outcome.reason = "; ".join(dict.fromkeys(reasons))
     return outcome
+
+
+def _windows(entries: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """One window per request: at most MAX_TITLES_PER_REQUEST headings plus fixed context in front."""
+    if len(entries) <= MAX_TITLES_PER_REQUEST:
+        return [entries]
+    windows = []
+    for start in range(0, len(entries), MAX_TITLES_PER_REQUEST):
+        context = entries[max(0, start - CONTEXT_TITLES) : start]
+        windows.append(context + entries[start : start + MAX_TITLES_PER_REQUEST])
+    return windows
+
+
+def _ask_window(
+    profile: dict[str, Any],
+    window: list[dict[str, Any]],
+    outcome: LlmOutcome,
+    reasons: list[str],
+) -> dict[int, int] | None:
+    """Ask about one window; None when the model failed or answered unusably."""
+    if not any(entry["frei"] for entry in window):
+        return None
+    prompt = build_prompt(window)
+    for attempt in range(MAX_ATTEMPTS):
+        try:
+            answer, cached = _ask(profile, prompt if attempt == 0 else prompt + "\nDie letzte Antwort war ungültig.")
+        except Exception as exc:  # network, server, malformed JSON
+            reasons.append(f"{type(exc).__name__}: {exc}")
+            return None
+        outcome.cached = outcome.cached or cached
+        levels, problem = validate(answer, window)
+        if levels is not None:
+            return levels
+        reasons.append(problem)
+    return None
