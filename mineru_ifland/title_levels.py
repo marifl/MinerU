@@ -331,3 +331,45 @@ def _level_numbered(middle_json: MiddleJson) -> None:
             # boxes and other unnumbered titles belong to the section they appear in
             level = MIN_LEVEL if last_numbered_level is None else min(last_numbered_level + 1, MAX_LEVEL)
         blocks[position] = _as_paragraph_title(block, level)
+
+
+def iter_titles(middle_json: MiddleJson) -> list[tuple[int, list, int, TitleBlock]]:
+    """All headings in reading order as (page_idx, page blocks, position, block)."""
+    return [
+        (page.page_idx, page.blocks, position, block)
+        for page in middle_json.pages
+        for position, block in enumerate(page.blocks)
+        if isinstance(block, (DocTitleBlock, ParagraphTitleBlock))
+    ]
+
+
+def uncertain_titles(middle_json: MiddleJson, mode: AppliedMode) -> set[int]:
+    """Indices (into `iter_titles`) of headings whose level the rules did not decide.
+
+    Those are the ones an LLM stage may re-rank: everything in an untouched document, the
+    unnumbered ones in a numbered document, and the extra headings of a slide below its own title.
+    """
+    titles = iter_titles(middle_json)
+    if mode == "off":
+        return {i for i, (_, _, _, block) in enumerate(titles) if isinstance(block, ParagraphTitleBlock)}
+    if mode == "numbered":
+        texts = [_text(block) for _, _, _, block in titles]
+        chapter_starts = [
+            isinstance(block, DocTitleBlock) and _numbering(text) is None
+            for (_, _, _, block), text in zip(titles, texts)
+        ]
+        numbering = _document_numbering(texts, chapter_starts)
+        return {
+            i
+            for i, ((_, _, _, block), n) in enumerate(zip(titles, numbering))
+            if n is None and isinstance(block, ParagraphTitleBlock)
+        }
+    seen_on_page: set[int] = set()
+    uncertain: set[int] = set()
+    for i, (page_idx, _, _, block) in enumerate(titles):
+        if not isinstance(block, ParagraphTitleBlock):
+            continue
+        if page_idx in seen_on_page and block.level > MIN_LEVEL + 1:
+            uncertain.add(i)
+        seen_on_page.add(page_idx)
+    return uncertain

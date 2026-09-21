@@ -2,7 +2,7 @@
 
     mineru-de -p <file|dir> -o <out> [-m auto|txt|ocr] [-b BACKEND] [-l LANG] [-s N] [-e N]
               [-f true|false] [-t true|false] [--image-analysis true|false]
-              [--title-levels auto|slides|numbered|off]
+              [--title-levels auto|slides|numbered|off] [--llm off|local|cloud]
 
 Output per input, as MinerU 3.x wrote it: <out>/<stem>/<backend dir>/ with
 <stem>.md, <stem>_content_list.json (plain text like 3.x), <stem>_content_list_v2.json (with
@@ -41,6 +41,7 @@ from mineru.version import __version__ as mineru_version
 
 from . import __version__
 from .gate import MIN_PAGE_RECALL, check_document
+from .llm_titles import apply_llm_levels, load_profiles
 from .title_levels import apply_title_levels
 
 # 3.x backend name -> (4.x tier, 3.x output directory name; {method} is the parse method)
@@ -76,6 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-t", "--table", type=_bool, default=True)
     parser.add_argument("--image-analysis", type=_bool, default=True)
     parser.add_argument("--title-levels", choices=["auto", "slides", "numbered", "off"], default="auto")
+    parser.add_argument("--llm", default="off",
+                        help="LLM profile for the headings the rules leave open: off (default), local, cloud, "
+                             "or a profile from $MINERU_HOME/ifland-llm.json")
     parser.add_argument("--gate", choices=["fail", "warn", "off"], default="fail",
                         help="fail: exit non-zero when a document is not proven complete (default)")
     parser.add_argument("--min-page-recall", type=float, default=MIN_PAGE_RECALL,
@@ -176,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
         if mode == "auto" and source_tier == "flash":
             mode = "off"  # Office, EPUB and HTML carry their own heading structure
         applied = apply_title_levels(result.middle_json, mode, landscape=_is_landscape(source))
+        llm = apply_llm_levels(result.middle_json, applied, args.llm) if args.llm != "off" else None
         target = output / source.stem / dir_pattern.format(method=args.method)
         provenance = {
             "tool": {"mineru_de": __version__, "mineru": mineru_version},
@@ -187,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
                 "image_analysis": args.image_analysis,
                 "page_range": page_range or "all",
             },
-            "title_levels": {"requested": args.title_levels, "applied": applied},
+            "title_levels": {"requested": args.title_levels, "applied": applied, "llm": llm and llm.as_dict()},
             "ignored": {"lang": args.lang} if args.lang else {},
         }
         write_legacy_layout(result, source, target, provenance)

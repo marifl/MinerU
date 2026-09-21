@@ -70,7 +70,7 @@ def test_writes_3x_layout_with_levels_and_provenance(tmp_path, landscape_pdf, mo
             for span in block["content"]["paragraph_content"]] == [["bold"]]
     provenance = json.loads((target / "Vorlesung 3_mineru.json").read_text())
     assert provenance["parse"] == {"tier": "standard", "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}
-    assert provenance["title_levels"] == {"requested": "auto", "applied": "slides"}
+    assert provenance["title_levels"] == {"requested": "auto", "applied": "slides", "llm": None}
     assert provenance["ignored"] == {"lang": "latin"}
     assert calls == [{"tier": "standard", "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}]
 
@@ -105,4 +105,4 @@ def test_office_inputs_keep_their_own_heading_levels(tmp_path, monkeypatch):
 
     provenance = json.loads((tmp_path / "out" / "Skript" / "hybrid_auto" / "Skript_mineru.json").read_text())
     assert calls == ["flash"]
-    assert provenance["title_levels"] == {"requested": "auto", "applied": "off"}
+    assert provenance["title_levels"] == {"requested": "auto", "applied": "off", "llm": None}
