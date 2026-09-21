@@ -7,7 +7,9 @@
 Output per input, as MinerU 3.x wrote it: <out>/<stem>/<backend dir>/ with
 <stem>.md, <stem>_content_list.json (plain text like 3.x), <stem>_content_list_v2.json (with
 bold/italic as `style`), images/, <stem>_origin.pdf,
-plus <stem>_middle_v4.json (MinerU 4 schema) and <stem>_mineru.json (provenance).
+plus <stem>_middle_v4.json (MinerU 4 schema), <stem>_mineru.json (provenance) and
+<stem>_pruefung.json (acceptance report: ok, incomplete, failed or unchecked, with the pages and
+words that are missing). With --gate fail (default) an unproven document ends with exit code 1.
 
 There is deliberately no <stem>_middle.json: MinerU 4 has a different middle schema, and readers of
 the 3.x `pdf_info` layout should fail loudly instead of reading the wrong structure.
@@ -38,6 +40,7 @@ from mineru.types import MiddleJson
 from mineru.version import __version__ as mineru_version
 
 from . import __version__
+from .gate import MIN_PAGE_RECALL, check_document
 from .title_levels import apply_title_levels
 
 # 3.x backend name -> (4.x tier, 3.x output directory name; {method} is the parse method)
@@ -73,6 +76,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-t", "--table", type=_bool, default=True)
     parser.add_argument("--image-analysis", type=_bool, default=True)
     parser.add_argument("--title-levels", choices=["auto", "slides", "numbered", "off"], default="auto")
+    parser.add_argument("--gate", choices=["fail", "warn", "off"], default="fail",
+                        help="fail: exit non-zero when a document is not proven complete (default)")
+    parser.add_argument("--min-page-recall", type=float, default=MIN_PAGE_RECALL,
+                        help="share of a page's text-layer words that must appear in the output")
     return parser
 
 
@@ -154,6 +161,7 @@ def main(argv: list[str] | None = None) -> int:
     output = Path(args.output).expanduser()
     paths = expand_input_paths([args.path])
     ensure_supported_inputs(paths)
+    not_ok: list[tuple[Path, dict]] = []
 
     for source in paths:
         source_tier = "flash" if is_flash_only_parse_extension(source) else tier
@@ -183,8 +191,23 @@ def main(argv: list[str] | None = None) -> int:
             "ignored": {"lang": args.lang} if args.lang else {},
         }
         write_legacy_layout(result, source, target, provenance)
-        print(f"mineru-de: {source} -> {target}", file=sys.stderr)
-    return 0
+
+        report = {"source": str(source), **check_document(
+            json.loads((target / f"{source.stem}_content_list.json").read_text(encoding="utf-8")),
+            source,
+            target,
+            min_page_recall=args.min_page_recall,
+        )} if args.gate != "off" else {"status": "unchecked", "reason": "gate switched off"}
+        _dump(target / f"{source.stem}_pruefung.json", report)
+        if report["status"] != "ok":
+            not_ok.append((source, report))
+        print(f"mineru-de: {source} -> {target} [{report['status']}]", file=sys.stderr)
+
+    for source, report in not_ok:
+        pages = ", ".join(f"S.{p['page']} {p['recall']:.0%}" for p in report.get("incomplete_pages", [])[:5])
+        problems = ", ".join(p["problem"] for p in report.get("problems", []))
+        print(f"mineru-de: {source.name}: {report['status']} {pages} {problems}".rstrip(), file=sys.stderr)
+    return 1 if (args.gate == "fail" and any(r["status"] in {"failed", "incomplete"} for _, r in not_ok)) else 0
 
 
 if __name__ == "__main__":

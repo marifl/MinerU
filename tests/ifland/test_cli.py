@@ -53,7 +53,10 @@ def test_writes_3x_layout_with_levels_and_provenance(tmp_path, landscape_pdf, mo
         "Vorlesung 3_middle_v4.json",
         "Vorlesung 3_mineru.json",
         "Vorlesung 3_origin.pdf",
+        "Vorlesung 3_pruefung.json",
     ]
+    report = json.loads((target / "Vorlesung 3_pruefung.json").read_text())
+    assert report["status"] == "unchecked"  # blank test pages carry no text layer to check against
     content_list = json.loads((target / "Vorlesung 3_content_list.json").read_text())
     assert [(b["text"].strip(), b.get("text_level")) for b in content_list if b["type"] == "text"] == [
         ("EFA", 2),
