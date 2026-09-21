@@ -10,6 +10,8 @@ bold/italic as `style`), images/, <stem>_origin.pdf,
 plus <stem>_middle_v4.json (MinerU 4 schema), <stem>_mineru.json (provenance) and
 <stem>_pruefung.json (acceptance report: ok, incomplete, failed or unchecked, with the pages and
 words that are missing). With --gate fail (default) an unproven document ends with exit code 1.
+Missing lines of an incomplete page are filled in from the PDF text layer and marked with
+"source": "text_layer_repair" (--repair off to keep the output exactly as MinerU produced it).
 
 There is deliberately no <stem>_middle.json: MinerU 4 has a different middle schema, and readers of
 the 3.x `pdf_info` layout should fail loudly instead of reading the wrong structure.
@@ -42,6 +44,7 @@ from mineru.version import __version__ as mineru_version
 from . import __version__
 from .gate import MIN_PAGE_RECALL, check_document
 from .llm_titles import apply_llm_levels, load_profiles
+from .repair import repair_pages
 from .title_levels import apply_title_levels
 
 # 3.x backend name -> (4.x tier, 3.x output directory name; {method} is the parse method)
@@ -80,6 +83,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--llm", default="off",
                         help="LLM profile for the headings the rules leave open: off (default), local, cloud, "
                              "or a profile from $MINERU_HOME/ifland-llm.json")
+    parser.add_argument("--repair", choices=["text-layer", "off"], default="text-layer",
+                        help="text-layer: append the missing lines of an incomplete page from the PDF text "
+                             "layer, marked with source=text_layer_repair (default)")
     parser.add_argument("--gate", choices=["fail", "warn", "off"], default="fail",
                         help="fail: exit non-zero when a document is not proven complete (default)")
     parser.add_argument("--min-page-recall", type=float, default=MIN_PAGE_RECALL,
@@ -197,12 +203,19 @@ def main(argv: list[str] | None = None) -> int:
         }
         write_legacy_layout(result, source, target, provenance)
 
-        report = {"source": str(source), **check_document(
-            json.loads((target / f"{source.stem}_content_list.json").read_text(encoding="utf-8")),
-            source,
-            target,
-            min_page_recall=args.min_page_recall,
-        )} if args.gate != "off" else {"status": "unchecked", "reason": "gate switched off"}
+        if args.gate == "off":
+            report = {"source": str(source), "status": "unchecked", "reason": "gate switched off"}
+        else:
+            content_list_path = target / f"{source.stem}_content_list.json"
+            content_list = json.loads(content_list_path.read_text(encoding="utf-8"))
+            checked = check_document(content_list, source, target, min_page_recall=args.min_page_recall)
+            repaired: list[dict] = []
+            if args.repair == "text-layer" and checked["incomplete_pages"]:
+                repaired = repair_pages(content_list, source, [p["page"] for p in checked["incomplete_pages"]])
+                if repaired:
+                    _dump(content_list_path, content_list)
+                    checked = check_document(content_list, source, target, min_page_recall=args.min_page_recall)
+            report = {"source": str(source), **checked, "repaired_pages": repaired}
         _dump(target / f"{source.stem}_pruefung.json", report)
         if report["status"] != "ok":
             not_ok.append((source, report))
