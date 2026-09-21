@@ -5,14 +5,15 @@ the model as a fixed anchor. Only the remaining headings are asked about - short
 local model is enough. The answer is accepted only if it is complete, stays within levels 2 to 6,
 leaves the anchors untouched and produces no level jump. Otherwise the rule result stands and the
 report says so. Temperature is 0 and answers are cached per model and prompt, so a document parsed
-twice gets the same levels.
+twice gets the same levels. A model that does not answer within the profile's `timeout`
+(120 s by default) is treated like any other failure: the rule result stands.
 
 Profiles live in $MINERU_HOME/ifland-llm.json (default ~/.mineru/ifland-llm.json):
 
     {"profiles": {"local": {"base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama",
                             "model": "qwen3.5:9b-mlx", "extra_body": {"reasoning_effort": "none"}},
                   "cloud": {"base_url": "http://127.0.0.1:11434/v1", "api_key": "ollama",
-                            "model": "glm-5.3-flash:cloud"}}}
+                            "model": "deepseek-v4.1-flash:cloud"}}}
 """
 
 from __future__ import annotations
@@ -40,12 +41,13 @@ DEFAULT_PROFILES: dict[str, dict[str, Any]] = {
     "cloud": {
         "base_url": "http://127.0.0.1:11434/v1",
         "api_key": "ollama",
-        "model": "glm-5.3-flash:cloud",
+        "model": "deepseek-v4.1-flash:cloud",
         "extra_body": {},
     },
 }
-CONTEXT_TITLES = 6
 MAX_ATTEMPTS = 2
+# a model that does not answer within this many seconds must not hold up a parse run
+DEFAULT_TIMEOUT = 120
 
 
 @dataclass
@@ -130,7 +132,12 @@ def _ask(profile: dict[str, Any], prompt: str) -> tuple[Any, bool]:
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=profile.get("api_key", ""), base_url=profile["base_url"])
+    client = OpenAI(
+        api_key=profile.get("api_key", ""),
+        base_url=profile["base_url"],
+        timeout=profile.get("timeout", DEFAULT_TIMEOUT),
+        max_retries=0,
+    )
     request: dict[str, Any] = {
         "model": profile["model"],
         "messages": [{"role": "user", "content": prompt}],

@@ -84,7 +84,7 @@ def test_a_failing_model_leaves_the_document_untouched(answers, monkeypatch):
     assert _levels(doc) == before
 
 
-def test_slides_ask_only_about_the_extra_headings_of_a_page(answers):
+def test_slides_are_not_asked_about(answers):
     doc = _doc(
         [_title(0, "EFA", doc=True), _title(1, "Ladungen"), _title(2, "Fördert"), _title(3, "Hemmt")],
         [_title(0, "EFA"), _title(1, "Eigenwert")],
@@ -92,7 +92,7 @@ def test_slides_ask_only_about_the_extra_headings_of_a_page(answers):
     mode = apply_title_levels(doc, "auto", landscape=True)
 
     assert mode == "slides"
-    assert uncertain_titles(doc, mode) == {2, 3}
+    assert uncertain_titles(doc, mode) == set()  # measured: a model flattens slide bullets
 
 
 def test_unknown_profile_is_refused(answers):
@@ -127,3 +127,27 @@ def test_answers_are_cached_per_model_and_prompt(monkeypatch, tmp_path):
     assert first == second == {"1": 3}
     assert (cached_first, cached_second) == (False, True)
     assert len(calls) == 1 and calls[0]["temperature"] == 0
+
+
+def test_the_model_call_carries_a_timeout(monkeypatch, tmp_path):
+    monkeypatch.setenv("MINERU_HOME", str(tmp_path))
+    seen = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+            self.chat = self
+
+        @property
+        def completions(self):
+            return self
+
+        def create(self, **kwargs):
+            message = type("M", (), {"content": "{}"})
+            return type("R", (), {"choices": [type("C", (), {"message": message})]})
+
+    monkeypatch.setattr("openai.OpenAI", _Client)
+
+    llm_titles._ask({**llm_titles.DEFAULT_PROFILES["cloud"], "timeout": 30}, "prompt with timeout")
+
+    assert seen["timeout"] == 30 and seen["max_retries"] == 0

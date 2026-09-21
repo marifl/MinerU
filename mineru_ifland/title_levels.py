@@ -346,8 +346,10 @@ def iter_titles(middle_json: MiddleJson) -> list[tuple[int, list, int, TitleBloc
 def uncertain_titles(middle_json: MiddleJson, mode: AppliedMode) -> set[int]:
     """Indices (into `iter_titles`) of headings whose level the rules did not decide.
 
-    Those are the ones an LLM stage may re-rank: everything in an untouched document, the
-    unnumbered ones in a numbered document, and the extra headings of a slide below its own title.
+    Those are the ones an LLM stage may re-rank: everything in an untouched document and the
+    unnumbered ones in a numbered document. Slides are excluded: measured on 2026-09-21, a model
+    lifted slide bullets ("DSM-5", "Fixierung") next to the slide title, which the position-based
+    rule had placed correctly below it.
     """
     titles = iter_titles(middle_json)
     if mode == "off":
@@ -364,12 +366,4 @@ def uncertain_titles(middle_json: MiddleJson, mode: AppliedMode) -> set[int]:
             for i, ((_, _, _, block), n) in enumerate(zip(titles, numbering))
             if n is None and isinstance(block, ParagraphTitleBlock)
         }
-    seen_on_page: set[int] = set()
-    uncertain: set[int] = set()
-    for i, (page_idx, _, _, block) in enumerate(titles):
-        if not isinstance(block, ParagraphTitleBlock):
-            continue
-        if page_idx in seen_on_page and block.level > MIN_LEVEL + 1:
-            uncertain.add(i)
-        seen_on_page.add(page_idx)
-    return uncertain
+    return set()
