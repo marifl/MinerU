@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -74,6 +75,9 @@ def _bool(value: str) -> bool:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="mineru-de", description=__doc__.split("\n\n")[0])
+    parser.add_argument("-v", "--version", action="version",
+                        version=f"mineru-de {__version__} (mineru {mineru_version})",
+                        help="version of this tool and of MinerU; put it into your cache fingerprint")
     parser.add_argument("-p", "--path", required=True, help="input file or directory")
     parser.add_argument("-o", "--output", required=True, help="output directory")
     parser.add_argument("-m", "--method", choices=["auto", "txt", "ocr"], default="auto")
@@ -81,8 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--effort", choices=["medium", "high"], default="medium",
                         help="hybrid backends: medium -> MinerU 4 tier basic, high -> tier standard")
     parser.add_argument("-l", "--lang", default=None, help="accepted for 3.x compatibility; MinerU 4 has no language switch")
-    parser.add_argument("-s", "--start", type=int, default=None, help="first page, 0-based")
-    parser.add_argument("-e", "--end", type=int, default=None, help="last page, 0-based")
+    parser.add_argument("-s", "--start", type=int, default=None, help="first page, 0-based (MinerU 3.x)")
+    parser.add_argument("-e", "--end", type=int, default=None, help="last page, 0-based (MinerU 3.x)")
+    parser.add_argument("--pages", default=None, help="pages as the PDF counts them: '1-5,8' or 'r3-r1' from the end")
     parser.add_argument("-f", "--formula", type=_bool, default=True)
     parser.add_argument("-t", "--table", type=_bool, default=True)
     parser.add_argument("--image-analysis", type=_bool, default=True)
@@ -100,7 +105,12 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _page_range(start: int | None, end: int | None) -> str:
+def _page_range(start: int | None, end: int | None, pages: str | None = None) -> str:
+    """--pages is 1-based like the PDF; -s/-e stay 0-based like MinerU 3.x."""
+    if pages:
+        if start is not None or end is not None:
+            sys.exit("mineru-de: use either --pages or -s/-e, not both")
+        return pages
     if start is None and end is None:
         return ""
     first = (start or 0) + 1
@@ -124,6 +134,46 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+PAGE_FILE = re.compile(r"(?<![A-Za-z0-9])page_(\d+)_")
+
+
+def renumber_pages(target: Path, content_list: list[dict], v2: list, markdown: Path) -> dict[str, str]:
+    """Count pages the way the PDF does: add 1-based `page_no` and rename `page_N_*` images.
+
+    MinerU counts pages from 0, every PDF reader from 1. `page_idx` keeps MinerU's number so old
+    readers stay correct; `page_no` and the image file names carry the printed page number.
+    """
+    for block in content_list:
+        if isinstance(block.get("page_idx"), int):
+            block["page_no"] = block["page_idx"] + 1
+
+    images = target / "images"
+    renames: dict[str, str] = {}
+    if images.is_dir():
+        for path in sorted(images.iterdir(), key=lambda f: -int(PAGE_FILE.search(f.name).group(1)) if PAGE_FILE.search(f.name) else 0):
+            match = PAGE_FILE.search(path.name)
+            if not match:
+                continue
+            new_name = path.name.replace(match.group(0), f"page_{int(match.group(1)) + 1}_", 1)
+            path.rename(images / new_name)
+            renames[path.name] = new_name
+
+    if renames:
+        for block in content_list:
+            name = Path(block["img_path"]).name if block.get("img_path") else None
+            if name in renames:
+                block["img_path"] = str(Path(block["img_path"]).with_name(renames[name]))
+        text = markdown.read_text(encoding="utf-8")
+        for old, new in renames.items():
+            text = text.replace(old, new)
+        markdown.write_text(text, encoding="utf-8")
+        serialized = json.dumps(v2, ensure_ascii=False)
+        for old, new in renames.items():
+            serialized = serialized.replace(old, new)
+        v2[:] = json.loads(serialized)
+    return renames
 
 
 def _dump(path: Path, data: object) -> None:
@@ -161,8 +211,14 @@ def write_legacy_layout(result: ParseResult, source: Path, target: Path, provena
         shutil.move(tmp / "markdown.md", target / f"{stem}.md")
         shutil.move(tmp / "middle_json.json", target / f"{stem}_middle_v4.json")
     # 3.x content lists carried plain text; bold/italic stay in content_list_v2 (`style`) and markdown
-    _dump(target / f"{stem}_content_list.json", render_content_list(_without_styles(exported)))
-    _dump(target / f"{stem}_content_list_v2.json", render_content_list_v2(exported))
+    content_list = render_content_list(_without_styles(exported))
+    v2 = render_content_list_v2(exported)
+    provenance["page_numbering"] = {
+        "page_idx": "0-based, as MinerU counts", "page_no": "1-based, as the PDF counts",
+        "images": "1-based", "renamed_images": len(renumber_pages(target, content_list, v2, target / f"{stem}.md")),
+    }
+    _dump(target / f"{stem}_content_list.json", content_list)
+    _dump(target / f"{stem}_content_list_v2.json", v2)
     if source.suffix.lower() == ".pdf":
         shutil.copyfile(source, target / f"{stem}_origin.pdf")
     _dump(target / f"{stem}_mineru.json", provenance)
@@ -175,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
 
     kind, dir_pattern = BACKENDS[args.backend]
     tier = {"pipeline": "basic", "vlm": "standard"}.get(kind) or EFFORT_TIER[args.effort]
-    page_range = _page_range(args.start, args.end)
+    page_range = _page_range(args.start, args.end, args.pages)
     output = Path(args.output).expanduser()
     paths = expand_input_paths([args.path])
     ensure_supported_inputs(paths)

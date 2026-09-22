@@ -4,4 +4,5 @@ Everything here builds on MinerU's public API and lives outside the `mineru` pac
 so rebasing onto a new upstream release never conflicts with this code.
 """
 
-__version__ = "0.1.0"
+# Bump on every behaviour change: callers put `mineru-de --version` into their cache fingerprint.
+__version__ = "0.2.0"

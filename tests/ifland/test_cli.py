@@ -116,3 +116,36 @@ def test_office_inputs_keep_their_own_heading_levels(tmp_path, monkeypatch):
     provenance = json.loads((tmp_path / "out" / "Skript" / "hybrid_auto" / "Skript_mineru.json").read_text())
     assert calls == ["flash"]
     assert provenance["title_levels"] == {"requested": "auto", "applied": "off", "llm": None}
+
+
+def test_version_names_both_tool_and_mineru(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--version"])
+
+    printed = capsys.readouterr().out
+    assert printed.startswith("mineru-de ") and "mineru " in printed
+
+
+def test_pages_are_counted_like_the_pdf(tmp_path, landscape_pdf, monkeypatch):
+    calls = []
+
+    def fake_parse(path, **kwargs):
+        calls.append(kwargs["page_range"])
+        return ParseResult(middle_json=_doc([_title(0, "Titel"), _text(1, "Text")]))
+
+    monkeypatch.setattr(cli, "parse", fake_parse)
+    out = tmp_path / "out"
+
+    cli.main(["-p", str(landscape_pdf), "-o", str(out), "--pages", "2-3"])
+
+    assert calls == ["2-3"]  # --pages is handed over unchanged: MinerU 4 counts like the PDF
+    target = out / "Vorlesung 3" / "hybrid_auto"
+    content_list = json.loads((target / "Vorlesung 3_content_list.json").read_text())
+    assert [(b["page_idx"], b["page_no"]) for b in content_list] == [(0, 1), (0, 1)]
+    provenance = json.loads((target / "Vorlesung 3_mineru.json").read_text())
+    assert provenance["page_numbering"]["page_no"] == "1-based, as the PDF counts"
+
+
+def test_pages_and_start_end_together_are_refused(tmp_path, landscape_pdf):
+    with pytest.raises(SystemExit, match="either --pages or -s/-e"):
+        cli.main(["-p", str(landscape_pdf), "-o", str(tmp_path), "--pages", "1-2", "-s", "0"])
