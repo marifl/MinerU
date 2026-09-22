@@ -69,6 +69,7 @@ def test_writes_3x_layout_with_levels_and_provenance(tmp_path, landscape_pdf, mo
     assert [span.get("style") for page in v2 for block in page if block["type"] == "paragraph"
             for span in block["content"]["paragraph_content"]] == [["bold"]]
     provenance = json.loads((target / "Vorlesung 3_mineru.json").read_text())
+    assert provenance["tool"]["docvortex"]  # asset names differ between docvortex versions
     assert provenance["parse"] == {"backend": "hybrid-engine", "effort": "medium", "tier": "basic",
                                    "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}
     assert provenance["title_levels"] == {"requested": "auto", "applied": "slides", "llm": None}

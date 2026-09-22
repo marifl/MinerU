@@ -176,6 +176,23 @@ def renumber_pages(target: Path, content_list: list[dict], v2: list, markdown: P
     return renames
 
 
+def _library_versions() -> dict[str, str]:
+    """Versions that change the output although the fork commit stays the same.
+
+    MinerU requires docvortex>=0.4.15,<1, and 0.4.22 names asset files differently than 0.4.16
+    (page_1_image_4.jpg vs page_1_image_body_4.jpg). Anyone comparing runs needs to see that.
+    """
+    from importlib.metadata import PackageNotFoundError, version
+
+    found = {}
+    for name in ("docvortex", "mineru-vl-utils", "mineru-llama-cpp"):
+        try:
+            found[name.replace("-", "_")] = version(name)
+        except PackageNotFoundError:
+            continue
+    return found
+
+
 def _dump(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=4), encoding="utf-8")
 
@@ -253,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         llm = apply_llm_levels(result.middle_json, applied, args.llm) if args.llm != "off" else None
         target = output / source.stem / dir_pattern.format(method=args.method)
         provenance = {
-            "tool": {"mineru_de": __version__, "mineru": mineru_version},
+            "tool": {"mineru_de": __version__, "mineru": mineru_version, **_library_versions()},
             "argv": sys.argv[1:] if argv is None else argv,
             "source": {"path": str(source.resolve()), "sha256": _sha256(source)},
             "parse": {
