@@ -2,7 +2,7 @@
 
     mineru-de -p <file|dir> -o <out> [-m auto|txt|ocr] [-b BACKEND] [-l LANG] [-s N] [-e N]
               [-f true|false] [-t true|false] [--image-analysis true|false]
-              [--title-levels auto|slides|numbered|off] [--llm off|local|cloud]
+              [--effort medium|high] [--title-levels auto|slides|numbered|off] [--llm off|local|cloud]
 
 Output per input, as MinerU 3.x wrote it: <out>/<stem>/<backend dir>/ with
 <stem>.md, <stem>_content_list.json (plain text like 3.x), <stem>_content_list_v2.json (with
@@ -47,15 +47,20 @@ from .llm_titles import apply_llm_levels, load_profiles
 from .repair import repair_pages
 from .title_levels import apply_title_levels
 
-# 3.x backend name -> (4.x tier, 3.x output directory name; {method} is the parse method)
+# 3.x backend name -> (kind, 3.x output directory name; {method} is the parse method).
+# MinerU 4 has tiers instead of backends: pipeline and hybrid with --effort medium map to "basic",
+# hybrid with --effort high and every vlm backend to "standard" (upstream's own mapping).
 BACKENDS = {
-    "pipeline": ("basic", "{method}"),
-    "hybrid-auto-engine": ("standard", "hybrid_{method}"),
-    "hybrid-http-client": ("standard", "hybrid_{method}"),
-    "vlm-auto-engine": ("standard", "vlm"),
-    "vlm-http-client": ("standard", "vlm"),
-    "vlm-mlx-engine": ("standard", "vlm"),
+    "pipeline": ("pipeline", "{method}"),
+    "hybrid-engine": ("hybrid", "hybrid_{method}"),
+    "hybrid-http-client": ("hybrid", "hybrid_{method}"),
+    "hybrid-auto-engine": ("hybrid", "hybrid_{method}"),  # name used by MinerU 3.1-3.3
+    "vlm-engine": ("vlm", "vlm"),
+    "vlm-http-client": ("vlm", "vlm"),
+    "vlm-auto-engine": ("vlm", "vlm"),
+    "vlm-mlx-engine": ("vlm", "vlm"),
 }
+EFFORT_TIER = {"medium": "basic", "high": "standard"}
 
 
 def _bool(value: str) -> bool:
@@ -72,7 +77,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-p", "--path", required=True, help="input file or directory")
     parser.add_argument("-o", "--output", required=True, help="output directory")
     parser.add_argument("-m", "--method", choices=["auto", "txt", "ocr"], default="auto")
-    parser.add_argument("-b", "--backend", choices=sorted(BACKENDS), default="hybrid-auto-engine")
+    parser.add_argument("-b", "--backend", choices=sorted(BACKENDS), default="hybrid-engine")
+    parser.add_argument("--effort", choices=["medium", "high"], default="medium",
+                        help="hybrid backends: medium -> MinerU 4 tier basic, high -> tier standard")
     parser.add_argument("-l", "--lang", default=None, help="accepted for 3.x compatibility; MinerU 4 has no language switch")
     parser.add_argument("-s", "--start", type=int, default=None, help="first page, 0-based")
     parser.add_argument("-e", "--end", type=int, default=None, help="last page, 0-based")
@@ -166,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
     if not args.formula or not args.table:
         sys.exit("mineru-de: MinerU 4 cannot switch off formula or table recognition (-f/-t false)")
 
-    tier, dir_pattern = BACKENDS[args.backend]
+    kind, dir_pattern = BACKENDS[args.backend]
+    tier = {"pipeline": "basic", "vlm": "standard"}.get(kind) or EFFORT_TIER[args.effort]
     page_range = _page_range(args.start, args.end)
     output = Path(args.output).expanduser()
     paths = expand_input_paths([args.path])
@@ -193,6 +201,8 @@ def main(argv: list[str] | None = None) -> int:
             "argv": sys.argv[1:] if argv is None else argv,
             "source": {"path": str(source.resolve()), "sha256": _sha256(source)},
             "parse": {
+                "backend": args.backend,
+                "effort": args.effort,
                 "tier": source_tier,
                 "ocr_mode": args.method,
                 "image_analysis": args.image_analysis,

@@ -69,10 +69,20 @@ def test_writes_3x_layout_with_levels_and_provenance(tmp_path, landscape_pdf, mo
     assert [span.get("style") for page in v2 for block in page if block["type"] == "paragraph"
             for span in block["content"]["paragraph_content"]] == [["bold"]]
     provenance = json.loads((target / "Vorlesung 3_mineru.json").read_text())
-    assert provenance["parse"] == {"tier": "standard", "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}
+    assert provenance["parse"] == {"backend": "hybrid-engine", "effort": "medium", "tier": "basic",
+                                   "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}
     assert provenance["title_levels"] == {"requested": "auto", "applied": "slides", "llm": None}
     assert provenance["ignored"] == {"lang": "latin"}
-    assert calls == [{"tier": "standard", "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}]
+    assert calls == [{"tier": "basic", "ocr_mode": "auto", "image_analysis": True, "page_range": "2-2"}]
+
+
+def test_effort_high_maps_to_the_standard_tier(tmp_path, landscape_pdf, monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli, "parse", lambda path, **kwargs: (calls.append(kwargs["tier"]), ParseResult(middle_json=_doc([_text(0, "x")])))[1])
+
+    cli.main(["-p", str(landscape_pdf), "-o", str(tmp_path / "out"), "-b", "hybrid-engine", "--effort", "high"])
+
+    assert calls == ["standard"]
 
 
 def test_pipeline_backend_maps_to_basic_tier_and_method_dir(tmp_path, landscape_pdf, monkeypatch):
